@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/s1crab/android-log-mcp/server/internal/analysis"
 	"github.com/s1crab/android-log-mcp/server/internal/store"
@@ -103,14 +104,55 @@ func (x *crashIndex) resetLocked() {
 	x.byKey, x.byKind = map[openKey][]string{}, map[openKey][]string{}
 }
 
+// openCrashes opens crashes.jsonl for the index. A variable so that a test
+// can fail it the way Windows does while another goroutine replaces the
+// file (a sharing violation or access denied that clears in milliseconds).
+var openCrashes = os.Open
+
+// openCrashRetry opens crashes.jsonl, retrying for up to about 200 ms when
+// the failure is not "does not exist": on Windows an open can fail with a
+// sharing violation or access denied while CompactAux replaces the file
+// (rename), and that is gone in milliseconds. Giving up at the first
+// failure made readers see "no such crash" for a stored one (issue #244).
+var crashOpenTries = 40
+
+func openCrashRetry(path string) (*os.File, error) {
+	var f *os.File
+	var err error
+	for i := 0; i < crashOpenTries; i++ {
+		if f, err = openCrashes(path); err == nil || os.IsNotExist(err) {
+			return f, err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil, err
+}
+
+// stored reports that the index knows crash id (after a refresh); false
+// also when the file cannot be read right now.
+func (x *crashIndex) stored(id string) bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if f := x.refreshLocked(); f != nil {
+		f.Close()
+	}
+	return x.ents[id] != nil
+}
+
+// CrashStored reports that crash id is in the persisted index.
+func CrashStored(st *store.Store, id string) bool { return crashIndexOf(st).stored(id) }
+
 // refreshLocked brings the index up to date and returns the open file
 // (nil when there is none); the caller closes it.
 func (x *crashIndex) refreshLocked() *os.File {
 	if x.ents == nil {
 		x.resetLocked()
 	}
-	f, err := os.Open(x.path)
+	f, err := openCrashRetry(x.path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil // not "the file is gone": keep the index; callers treat nil as "unreadable now"
+		}
 		if x.fi != nil || x.off > 0 {
 			x.resetLocked()
 		}

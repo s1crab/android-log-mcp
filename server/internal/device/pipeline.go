@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -387,6 +388,18 @@ func (p *Pipeline) attachLocked(in *analysis.Crash, fromDropbox bool) {
 	var latest *analysis.Crash
 	if in.ID != "" {
 		latest = CrashFull(p.Store, in.ID)[0]
+		for try := 0; latest == nil && try < 20 && CrashStored(p.Store, in.ID); try++ {
+			// The fact is stored but its line could not be read just now
+			// (Windows: crashes.jsonl being replaced by a compaction).
+			// Merging onto nothing would append a bare version and, last
+			// line wins, erase the stored evidence and ordinal (issue #244).
+			time.Sleep(5 * time.Millisecond)
+			latest = CrashFull(p.Store, in.ID)[0]
+		}
+		if latest == nil && CrashStored(p.Store, in.ID) {
+			log.Printf("crash %s is stored but unreadable; not overwriting it with a partial version", in.ID)
+			return
+		}
 	}
 	out := analysis.MergeFact(latest, in, mode)
 	now := time.Now().UnixNano()
