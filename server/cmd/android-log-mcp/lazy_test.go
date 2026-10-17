@@ -203,8 +203,8 @@ func TestClientRestartsPinnedService(t *testing.T) {
 	_ = s
 }
 
-// A version handoff keeps the pins (the new service resumes recording)
-// and drops devices started by tool calls.
+// A version handoff keeps the pins (the new service resumes recording) and,
+// through run/wanted.json (#226), the devices started by tool calls.
 func TestHandoffKeepsPins(t *testing.T) {
 	t.Parallel()
 	env, e := lazyEnv(t)
@@ -238,9 +238,50 @@ func TestHandoffKeepsPins(t *testing.T) {
 		t.Fatalf("pin lost:\n%s", st)
 	}
 	eventually(t, "recording resumes", wait, func() bool { return e.LogcatRunning("FAKEA") })
-	eventually(t, "the call-started device is not carried over", wait, func() bool { return !e.LogcatRunning("FAKEB") })
+	eventually(t, "the call-started device is carried over (wanted.json)", wait, func() bool { return e.LogcatRunning("FAKEB") })
 	b, _ := os.ReadFile(filepath.Join(controlDirOf(env), "run", "record.json"))
 	if strings.Contains(string(b), "ended without shutting down") {
 		t.Fatalf("handoff counted as a crash:\n%s", b)
+	}
+}
+
+// #226 (design 7.1 1c-bis): a device that a client used and left, still within
+// its linger, is resumed by the successor of a killed service, even when the
+// client that starts it is for another device; an explicit `service stop`
+// resumes nothing.
+func TestKilledServiceResumesWantedDevice(t *testing.T) {
+	t.Parallel()
+	env, e := lazyEnv(t)
+	e.AddDevice("FAKEB", "boot-b")
+	e.SetDevices(map[string]string{"FAKEA": "device", "FAKEB": "device"})
+	dir := filepath.Join(controlDirOf(env), "run")
+	if out, errOut, code := cliEnv(t, env, "call", "logcat_status", `{"device":"FAKEA"}`); code != 0 {
+		t.Fatalf("call FAKEA: %d\n%s\n%s", code, out, errOut)
+	}
+	eventually(t, "FAKEA recorded", 60*time.Second, func() bool { return e.LogcatRunning("FAKEA") })
+	// the file is written within the debounce (1 s) of the call
+	eventually(t, "wanted.json names FAKEA", 60*time.Second, func() bool {
+		b, _ := os.ReadFile(filepath.Join(dir, "wanted.json"))
+		return strings.Contains(string(b), "FAKEA")
+	})
+	old := statePID(t, env)
+	p, _ := os.FindProcess(old)
+	p.Kill()
+	waitGone(t, old)
+	if out, errOut, code := cliEnv(t, env, "call", "logcat_status", `{"device":"FAKEB"}`); code != 0 {
+		t.Fatalf("call FAKEB: %d\n%s\n%s", code, out, errOut)
+	}
+	if pid := statePID(t, env); pid == 0 || pid == old {
+		t.Fatalf("no new service (old %d, now %d)", old, pid)
+	}
+	eventually(t, "FAKEA resumed by the successor", 60*time.Second, func() bool { return e.LogcatRunning("FAKEA") })
+	eventually(t, "FAKEB recorded", 60*time.Second, func() bool { return e.LogcatRunning("FAKEB") })
+
+	// an explicit stop clears the file: the next start resumes nothing
+	if out, errOut, code := cliEnv(t, env, "service", "stop"); code != 0 {
+		t.Fatalf("service stop: %d\n%s\n%s", code, out, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "wanted.json")); err == nil {
+		t.Fatal("service stop left wanted.json")
 	}
 }

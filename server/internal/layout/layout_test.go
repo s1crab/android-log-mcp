@@ -266,3 +266,36 @@ func TestSweepRunStaleSockets(t *testing.T) {
 		t.Errorf("removed %d entries, want 4", n)
 	}
 }
+
+// run/wanted.json (issue #226) is the carry for the successor of a crashed or
+// replaced service: its writer is dead exactly when the sweep runs, and it has
+// no pid key. SweepRun must keep it (KeepRun) and still remove a leftover
+// wanted.json.tmp by age and the unrelated state files as before.
+func TestSweepRunKeepsWantedJSON(t *testing.T) {
+	dir := t.TempDir()
+	wanted := `{"writer":{"pid":1073741824,"start_time":1},"written_at":1792000000000,"devices":{"avd-X":{"idle_ms":1,"linger_ms":-1}}}`
+	os.WriteFile(filepath.Join(dir, "wanted.json"), []byte(wanted), 0o600)
+	// old, unreadable and empty: still kept (it is not an endpoint file)
+	os.WriteFile(filepath.Join(dir, "record.json"), []byte("{}"), 0o600)
+	os.Chtimes(filepath.Join(dir, "wanted.json"), time.Now().Add(-72*time.Hour), time.Now().Add(-72*time.Hour))
+	write(t, filepath.Join(dir, "wanted.json.tmp"), 3, time.Now().Add(-48*time.Hour))
+	os.WriteFile(filepath.Join(dir, "gone.json"), []byte(`{"pid":1073741824}`), 0o600)
+
+	SweepRun(dir, 24*time.Hour, time.Now())
+	if b, err := os.ReadFile(filepath.Join(dir, "wanted.json")); err != nil || string(b) != wanted {
+		t.Fatalf("wanted.json swept or changed: %v %s", err, b)
+	}
+	if exists(filepath.Join(dir, "wanted.json.tmp")) {
+		t.Error("an old wanted.json.tmp was not swept")
+	}
+	if exists(filepath.Join(dir, "gone.json")) {
+		t.Error("a state file of a dead pid was not swept")
+	}
+	// the same file is also kept when the sweep sees it as unreadable garbage
+	os.WriteFile(filepath.Join(dir, "wanted.json"), []byte("{garbage"), 0o600)
+	os.Chtimes(filepath.Join(dir, "wanted.json"), time.Now().Add(-72*time.Hour), time.Now().Add(-72*time.Hour))
+	SweepRun(dir, 24*time.Hour, time.Now())
+	if !exists(filepath.Join(dir, "wanted.json")) {
+		t.Error("wanted.json swept")
+	}
+}

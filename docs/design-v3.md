@@ -618,7 +618,7 @@ On a new online adb serial the service's manager probes the identity asynchronou
 
 ### 10.4 Sweep (`layout.Sweep`, in the service at start and every minute)
 
-1. `run/`: remove state files whose pid is dead or whose socket does not accept a connection, orphan sockets, other files older than MaxAge; never `*.lock` files (held locks would be lost).
+1. `run/`: remove state files whose pid is dead or whose socket does not accept a connection, orphan sockets, other files older than MaxAge; never `*.lock` files (held locks would be lost) and never `record.json` or `wanted.json` (`KeepRun`; a stale `wanted.json.tmp` goes by age).
 2. Legacy `owners/`: lock files nobody holds, then the dir.
 3. `tmp/`: files older than 1 h.
 4. `bin/`: keep the running binary's dir (`Manager.KeepBin`) and the newest other one (by binary mtime; reuse touches it); delete older ones (known names only).

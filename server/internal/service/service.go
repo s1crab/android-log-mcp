@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/s1crab/android-log-mcp/server/internal/device"
@@ -53,6 +54,9 @@ type Options struct {
 	// Getenv reads the service's environment settings (ANDROID_LOG_MCP_LINGER);
 	// nil = os.Getenv. Tests pass their own instead of t.Setenv (#26).
 	Getenv func(string) string
+	// Wanted holds the durations of the run/wanted.json carry (#226); zero
+	// values are the defaults.
+	Wanted WantedTiming
 	// ADBPath is the adb binary for the device manager; "" = device.FindADB.
 	ADBPath string
 }
@@ -78,6 +82,11 @@ type Service struct {
 	exitTick    time.Duration
 	idleSince   time.Time // no clients, no pin, nothing recorded since (lifeLoop)
 	carry       device.WantState
+
+	wanted      *wantedWriter // nil: embedded service
+	wantedTm    WantedTiming
+	clearWanted atomic.Bool // the stop is explicit or idle: remove wanted.json
+	restoreWG   sync.WaitGroup
 
 	pinMu    sync.Mutex
 	pins     *PinFile // nil: record.json is unusable (pinsErr)
@@ -244,6 +253,23 @@ func Start(opt Options) (*Service, error) {
 	// before the manager's startup sweep removes a crashed service's
 	// stale service.json: a pinned recording counts that crash
 	s.loadPins(opt.Control.ReadState())
+	// run/wanted.json of the replaced or crashed service: read once into
+	// memory before the manager starts (nothing may rewrite it first)
+	var carry *wantedFile
+	s.wantedTm = opt.Wanted.withDefaults()
+	if opt.Embedded == "" {
+		var err error
+		if carry, err = readWanted(opt.Control.WantedPath()); err != nil {
+			log.Printf("service: ignoring %s: %v", opt.Control.WantedPath(), err)
+			carry = nil
+		}
+		s.wanted = newWantedWriter(opt.Control.WantedPath(), s.wantedTm, func(now time.Time) map[string]device.WantInfo {
+			if m := s.Manager(); m != nil {
+				return m.WantInfos(now)
+			}
+			return nil
+		})
+	}
 	s.startManager(root)
 	go retryCleanup(opt.Control, root)
 	l, err := ipc.Listen(opt.Control.Socket())
@@ -258,6 +284,10 @@ func Start(opt Options) (*Service, error) {
 	go s.lifeLoop() // a service nobody uses does not stay forever
 	if err := s.writeState(); err != nil {
 		log.Printf("service: writing %s: %v", opt.Control.StatePath(), err)
+	}
+	if carry != nil {
+		s.restoreWG.Add(1)
+		go s.restoreWanted(carry)
 	}
 	log.Printf("service started: pid %d, version %s, protocol %d, root %s, socket %s", os.Getpid(), opt.Version, Proto, root, opt.Control.Socket())
 	return s, nil
@@ -277,6 +307,9 @@ func (s *Service) startManager(root string) {
 		m.ADBPath = s.opt.ADBPath
 	}
 	m.PinnedUntil = s.pinUntil
+	if s.wanted != nil {
+		m.OnWantChange = s.wanted.Changed
+	}
 	if s.opt.CatchUpWait > 0 {
 		m.CatchUpWait = s.opt.CatchUpWait
 	}
@@ -439,6 +472,7 @@ func (s *Service) handle(ctx context.Context, c *ipc.Conn, op string, body json.
 		text, isErr := t.Call(mcpserver.WithStatusMemo(ctx, h.status), a.Name, a.Args)
 		return CallReply{Text: text, IsError: isErr}, nil
 	case "stop":
+		s.clearWanted.Store(true) // an explicit stop resumes nothing
 		go s.Stop(fmt.Sprintf("stop requested (pid %d)", h.PID))
 		return "stopping", nil
 	case "handoff":
@@ -481,6 +515,13 @@ func (s *Service) Stop(reason string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	s.srv.Close()
+	s.restoreWG.Wait() // nothing is resumed after the manager closed
+	if s.wanted != nil {
+		// before the manager stops (a long flush must not be behind it) and
+		// before the lock is released; synchronous, ordered after any
+		// pending debounced write
+		s.wanted.Close(s.clearWanted.Load())
+	}
 	s.stopManager()
 	if st := s.opt.Control.ReadState(); st != nil && st.PID == os.Getpid() {
 		os.Remove(s.opt.Control.StatePath())

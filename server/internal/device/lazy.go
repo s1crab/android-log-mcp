@@ -179,6 +179,7 @@ func (m *Manager) Want(id string, call bool) error {
 	defer m.wantMu.Unlock()
 	m.mu.Lock()
 	w := m.wanted[id]
+	created := false
 	if w == nil {
 		if len(m.wanted) >= m.MaxDevices {
 			cur := make([]string, 0, len(m.wanted))
@@ -191,6 +192,7 @@ func (m *Manager) Want(id string, call bool) error {
 		}
 		w = &want{since: time.Now()}
 		m.wanted[id] = w
+		created = true
 		log.Printf("%s: recording starts", id)
 	}
 	if call {
@@ -212,7 +214,16 @@ func (m *Manager) Want(id string, call bool) error {
 		m.applyStates()
 	}
 	m.activity()
+	m.wantChanged(created)
 	return nil
+}
+
+// wantChanged tells OnWantChange that the wanted set (setChanged) or only a
+// device's last call changed. It is called without m.mu held.
+func (m *Manager) wantChanged(setChanged bool) {
+	if f := m.OnWantChange; f != nil {
+		f(setChanged)
+	}
 }
 
 // Begin marks a log-tool call on the device as in flight (it is never
@@ -233,6 +244,7 @@ func (m *Manager) Begin(id string) func() {
 			w.last = time.Now()
 		}
 		m.mu.Unlock()
+		m.wantChanged(false)
 	}
 }
 
@@ -253,6 +265,7 @@ func (m *Manager) Unwant(id, reason string) {
 		m.stopTracking()
 	}
 	m.activity()
+	m.wantChanged(true)
 }
 
 // unwantIdle is Unwant for an idle stop: under the lock it re-checks that
@@ -275,6 +288,7 @@ func (m *Manager) unwantIdle(id, reason string) {
 		m.stopTracking()
 	}
 	m.activity()
+	m.wantChanged(true)
 }
 
 // beforeIdleStop (tests) runs between CheckIdle's decision to stop a device
@@ -473,19 +487,78 @@ func (m *Manager) Snapshot() WantState {
 	return out
 }
 
-// Restore starts the devices of a Snapshot again with their timers.
+// Restore starts the devices of a Snapshot again with their timers (set-root).
+// A device that is already wanted keeps the later of the two last calls.
 func (m *Manager) Restore(ws WantState) {
 	for id, e := range ws {
-		if err := m.Want(id, false); err != nil {
-			log.Printf("%s: restarting recording: %v", id, err)
+		m.RestoreWant(id, e.Last, e.Since)
+	}
+}
+
+// RestoreWant starts device id again as if it was last called at last. It
+// merges instead of overwriting: a call that already refreshed the device
+// keeps its later last (the restore must never shorten a live timer). since
+// (zero: keep) is when the device was started. It returns the Want error
+// (for example *ErrMaxDevices).
+func (m *Manager) RestoreWant(id string, last, since time.Time) error {
+	if err := m.Want(id, false); err != nil {
+		log.Printf("%s: restarting recording: %v", id, err)
+		return err
+	}
+	m.mu.Lock()
+	if w := m.wanted[id]; w != nil {
+		if last.After(w.last) {
+			w.last = last
+		}
+		if !since.IsZero() && since.Before(w.since) {
+			w.since = since
+		}
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// WantInfo is what a successor needs to resume one started device: how long
+// ago its last log-tool call was and the linger in force (-1: forever).
+type WantInfo struct {
+	Idle   time.Duration
+	Linger time.Duration
+}
+
+// WantInfos lists the started devices that had a log-tool call (a pin-only
+// device, last zero, is re-applied by the pins). Idle comes from the
+// monotonic clock; a call in flight counts as idle 0.
+func (m *Manager) WantInfos(now time.Time) map[string]WantInfo {
+	m.mu.Lock()
+	type e struct {
+		w *want
+		d *Device
+	}
+	tmp := map[string]e{}
+	for id, w := range m.wanted {
+		if w.last.IsZero() {
 			continue
 		}
-		m.mu.Lock()
-		if w := m.wanted[id]; w != nil {
-			w.last, w.since = e.Last, e.Since
-		}
-		m.mu.Unlock()
+		tmp[id] = e{w, m.devices[id]}
 	}
+	idle := map[string]time.Duration{}
+	for id, x := range tmp {
+		if x.w.busy > 0 {
+			idle[id] = 0
+		} else {
+			idle[id] = max(0, now.Sub(x.w.last))
+		}
+	}
+	m.mu.Unlock()
+	out := map[string]WantInfo{}
+	for id, x := range tmp {
+		l := time.Duration(-1)
+		if m.Linger != nil {
+			l = m.Linger(x.d)
+		}
+		out[id] = WantInfo{Idle: idle[id], Linger: l}
+	}
+	return out
 }
 
 // WaitRecording waits up to timeout until the wanted device id is attached

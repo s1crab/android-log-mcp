@@ -84,6 +84,7 @@ func (s *Service) lifeLoop() {
 		case <-t.C:
 		}
 		if reason, ok := s.checkExit(time.Now()); ok {
+			s.clearWanted.Store(true) // idle: nothing is recorded, nothing to resume
 			go s.Stop(reason)
 			return
 		}

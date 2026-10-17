@@ -490,8 +490,12 @@ type RunState struct {
 }
 
 // KeepRun are run/ files that are not process endpoints and are never
-// swept (record.json: the recording pins, issue #11).
-var KeepRun = map[string]bool{"record.json": true}
+// swept (record.json: the recording pins, issue #11; wanted.json: the devices
+// a replaced or crashed service process was recording, issue #226. Its
+// writer is dead exactly when it matters, and it has no top-level pid, so
+// the process check below would delete it. A leftover wanted.json.tmp is not
+// a .json file and goes with the age rule).
+var KeepRun = map[string]bool{"record.json": true, "wanted.json": true}
 
 // SweepRun removes stale runtime entries from run/: state files whose
 // process is gone or whose socket no longer accepts connections, sockets

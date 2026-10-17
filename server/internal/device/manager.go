@@ -62,6 +62,9 @@ type Manager struct {
 	PinnedUntil func(id string) time.Time
 	// OnActivity is called after devices start or stop.
 	OnActivity func()
+	// OnWantChange is called (without locks, must not block) when the wanted
+	// set changed (setChanged) or only a device's last log-tool call did.
+	OnWantChange func(setChanged bool)
 	// IdleTick is how often idle devices are checked (default 1 s).
 	IdleTick time.Duration
 
