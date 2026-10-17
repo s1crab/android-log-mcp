@@ -22,6 +22,7 @@ import (
 //	run/service.lock   held by the running service (single instance)
 //	run/service.json   the service's pid, version, protocol, socket, root
 //	run/service.sock   the socket (long control dir paths: /tmp/alm-<uid>/<hash>.sock, ipc.SocketPath)
+//	run/wanted.json    the devices being recorded, for the successor of a replaced or crashed service (wanted.go)
 //	run/spawn.lock     serializes clients starting the service
 //	run/config.lock    serializes set-root
 //	config.json        {"root": …} written by set-root only
@@ -34,6 +35,7 @@ func (c Control) Run() string            { return filepath.Join(c.Dir, "run") }
 func (c Control) Socket() string         { return ipc.SocketPath(c.Run()) }
 func (c Control) LockPath() string       { return filepath.Join(c.Run(), "service.lock") }
 func (c Control) StatePath() string      { return filepath.Join(c.Run(), "service.json") }
+func (c Control) WantedPath() string     { return filepath.Join(c.Run(), "wanted.json") }
 func (c Control) SpawnLockPath() string  { return filepath.Join(c.Run(), "spawn.lock") }
 func (c Control) ConfigPath() string     { return filepath.Join(c.Dir, "config.json") }
 func (c Control) ConfigLockPath() string { return filepath.Join(c.Run(), "config.lock") }

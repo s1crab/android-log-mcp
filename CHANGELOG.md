@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- After a crash, a kill or an automatic replacement (a newer MCP or CLI process, a hung service process), the new service process resumes recording the devices that were still within their linger time (default 10 min to 1 h after the last log tool call), even if the MCP or CLI process that used them has gone ([#226](https://github.com/s1crab/android-log-mcp/issues/226)). Each device stops at the end of that linger as before; an idle exit, `service stop` and `service stop --force` restore nothing, nor does a cold start; `ANDROID_LOG_MCP_LINGER=0` disables it. The devices are carried in the new optional file `run/wanted.json` (the writer's pid and start time, the write time, per device the idle time and linger; unknown keys and a garbage file are ignored, and older binaries never read it).
+
 ### Fixed
 
 - A call made right after the service went away (for example an MCP process whose in-process service stopped) no longer fails with `write: broken pipe`: a write to a closing service socket is treated as a lost connection, so the client reconnects, starts or takes over the service and retries the read-only call ([#237](https://github.com/s1crab/android-log-mcp/issues/237)).

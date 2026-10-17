@@ -56,6 +56,7 @@ func forceStop(ctrl Control, d Diagnosis, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "android-log-mcp service stop --force: %v (%s)\n", err, d.Text(ctrl))
 		return 1
 	}
+	ClearWanted(ctrl) // an explicit stop resumes nothing (the service cannot tell it from a replacement)
 	how := "stopped"
 	if res.Killed {
 		how = "killed"
